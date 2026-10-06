@@ -15,6 +15,7 @@ interface Engine {
   gain: GainNode;
   oscA: OscillatorNode;
   oscB: OscillatorNode;
+  skid: GainNode;
 }
 
 export function createAudio(): GameAudio {
@@ -28,8 +29,7 @@ export function createAudio(): GameAudio {
     }
     try {
       const Ctor =
-        window.AudioContext ??
-        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Ctor) return;
       const ctx = new Ctor();
       const master = ctx.createGain();
@@ -52,7 +52,25 @@ export function createAudio(): GameAudio {
       oscA.start();
       oscB.start();
 
-      engine = { ctx, master, gain, oscA, oscB };
+      // 드리프트 중에 계속 나는 타이어 마찰음
+      const skidBuffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+      const skidData = skidBuffer.getChannelData(0);
+      for (let i = 0; i < skidData.length; i++) skidData[i] = Math.random() * 2 - 1;
+      const skidSource = ctx.createBufferSource();
+      skidSource.buffer = skidBuffer;
+      skidSource.loop = true;
+      const skidFilter = ctx.createBiquadFilter();
+      skidFilter.type = 'bandpass';
+      skidFilter.frequency.value = 1700;
+      skidFilter.Q.value = 4;
+      const skid = ctx.createGain();
+      skid.gain.value = 0;
+      skidSource.connect(skidFilter);
+      skidFilter.connect(skid);
+      skid.connect(master);
+      skidSource.start();
+
+      engine = { ctx, master, gain, oscA, oscB, skid };
     } catch {
       engine = null;
     }
@@ -96,23 +114,47 @@ export function createAudio(): GameAudio {
     source.start();
   }
 
-  function play(e: Engine, event: GameEvent): void {
+  function play(e: Engine, event: GameEvent, combo: number): void {
+    const pitch = 1 + 0.07 * Math.min(8, combo);
     switch (event) {
       case 'crash':
         noise(e, 0.35, 0.35);
         tone(e, 110, 0.3, 'square', 0.15, 0, 40);
+        break;
+      case 'fall':
+        tone(e, 700, 0.6, 'sine', 0.16, 0, 90);
+        noise(e, 0.3, 0.15);
+        break;
+      case 'overtake':
+        [660, 880, 1175].forEach((f, i) => tone(e, f * pitch, 0.1, 'square', 0.1, i * 0.06));
+        break;
+      case 'overtaken':
+        tone(e, 330, 0.18, 'square', 0.08, 0, 220);
+        break;
+      case 'bump':
+        noise(e, 0.12, 0.2);
+        tone(e, 160, 0.12, 'square', 0.1, 0, 90);
         break;
       case 'checkpoint':
         tone(e, 660, 0.12, 'square', 0.12);
         tone(e, 880, 0.12, 'square', 0.12, 0.12);
         tone(e, 1320, 0.25, 'square', 0.12, 0.24);
         break;
-      case 'nearMiss':
-        tone(e, 1200, 0.08, 'triangle', 0.14, 0, 1800);
-        break;
       case 'nitroStart':
         tone(e, 200, 0.5, 'sawtooth', 0.14, 0, 1200);
         noise(e, 0.4, 0.1);
+        break;
+      case 'turbo':
+        tone(e, 260, 0.3, 'sawtooth', 0.12, 0, 1100);
+        noise(e, 0.25, 0.08);
+        break;
+      case 'counterBoost':
+        tone(e, 900, 0.16, 'triangle', 0.16, 0, 2200);
+        tone(e, 1400, 0.16, 'triangle', 0.1, 0.08, 2600);
+        break;
+      case 'boosterReady':
+        tone(e, 880, 0.1, 'square', 0.1);
+        tone(e, 1320, 0.18, 'square', 0.1, 0.1);
         break;
       case 'timeWarning':
         tone(e, 990, 0.1, 'square', 0.1);
@@ -123,8 +165,6 @@ export function createAudio(): GameAudio {
       case 'timeUp':
         tone(e, 440, 0.8, 'sawtooth', 0.14, 0, 110);
         break;
-      case 'pass':
-        break;
     }
   }
 
@@ -132,11 +172,13 @@ export function createAudio(): GameAudio {
     if (!engine) return;
     const now = engine.ctx.currentTime;
     const ratio = state.player.speed / MAX_SPEED;
-    const frequency = 55 + ratio * 150 + (state.player.nitroActive ? 25 : 0);
+    const frequency = 55 + ratio * 150 + (state.player.nitroActive || state.player.turbo > 0 ? 25 : 0);
     engine.oscA.frequency.setTargetAtTime(frequency, now, 0.05);
     engine.oscB.frequency.setTargetAtTime(frequency * 1.51, now, 0.05);
     engine.gain.gain.setTargetAtTime(state.phase === 'racing' ? 0.05 + 0.06 * ratio : 0, now, 0.08);
-    for (const event of state.events) play(engine, event);
+    const sliding = state.phase === 'racing' && state.player.drifting;
+    engine.skid.gain.setTargetAtTime(sliding ? 0.09 : 0, now, 0.04);
+    for (const event of state.events) play(engine, event, state.combo);
   }
 
   function toggleMute(): boolean {

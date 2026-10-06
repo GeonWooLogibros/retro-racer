@@ -15,8 +15,9 @@ export function project(
   cameraX: number,
   cameraY: number,
   cameraZ: number,
+  depth = CAMERA_DEPTH,
 ): Projected {
-  const scale = CAMERA_DEPTH / (worldZ - cameraZ);
+  const scale = depth / (worldZ - cameraZ);
   return {
     x: WIDTH / 2 + (scale * (worldX - cameraX) * WIDTH) / 2,
     y: HEIGHT / 2 - (scale * (worldY - cameraY) * HEIGHT) / 2,

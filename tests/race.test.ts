@@ -9,7 +9,7 @@ const track = buildTrack();
 
 function make(over: Partial<GameState> = {}, playerOver: Partial<Player> = {}): GameState {
   const base = startRace(track);
-  return { ...base, cars: [], ...over, player: { ...base.player, speed: 5000, ...playerOver } };
+  return { ...base, ...over, player: { ...base.player, speed: 5000, ...playerOver } };
 }
 
 describe('updateRace', () => {

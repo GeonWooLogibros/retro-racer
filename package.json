@@ -7,11 +7,16 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:web": "tsc --noEmit && vite build --mode web --outDir dist-web"
   },
   "devDependencies": {
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
     "vitest": "^3.2.7"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
+    "peerjs": "^1.5.5"
   }
 }
