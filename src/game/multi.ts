@@ -45,6 +45,8 @@ export interface Racer {
   seed: number;
   /** 'wait'는 대기실, 'race'는 경주 중입니다. */
   phase: 'wait' | 'race';
+  /** 대기실에서 준비를 마쳤는지 여부. 방장은 준비할 필요가 없습니다. */
+  ready: boolean;
   /** 지금 달리고 있는 경주의 이름. 경주를 시작할 때마다 방장이 새로 정합니다. */
   race: string | null;
   z: number;
@@ -71,6 +73,7 @@ export function readRacer(peer: string, presence: Readonly<Record<string, unknow
     map: Math.max(0, Math.floor(num(presence.map))),
     seed: Math.max(0, Math.floor(num(presence.seed))),
     phase: presence.phase === 'race' ? 'race' : 'wait',
+    ready: presence.ready === true,
     race: typeof presence.race === 'string' ? presence.race.slice(0, 32) : null,
     z: num(presence.z),
     x: Math.max(-2, Math.min(2, num(presence.x))),
@@ -112,4 +115,21 @@ export function standings<T extends Pick<Racer, 'z' | 'done' | 'out'>>(racers: r
 /** 마지막으로 받은 위치에서 속도만큼 앞으로 밀어서, 받는 사이사이에도 부드럽게 움직이게 합니다. */
 export function extrapolate(z: number, speed: number, ageMs: number): number {
   return z + (speed * Math.min(EXTRAPOLATE_LIMIT, Math.max(0, ageMs))) / 1000;
+}
+
+/** 방에 들어올 수 있는 최대 인원. 대기실에 이만큼 자리를 보여 줍니다. */
+export const MAX_PLAYERS = 8;
+
+/** 대기실의 준비 상황. 방장을 뺀 사람 가운데 몇 명이 준비했는지와, 방장이 시작할 수 있는지를 알려 줍니다. */
+export function readiness(
+  racers: readonly Pick<Racer, 'peer' | 'ready'>[],
+  host: string | null,
+): {
+  ready: number;
+  needed: number;
+  canStart: boolean;
+} {
+  const guests = racers.filter((racer) => racer.peer !== host);
+  const ready = guests.filter((racer) => racer.ready).length;
+  return { ready, needed: guests.length, canStart: ready === guests.length };
 }

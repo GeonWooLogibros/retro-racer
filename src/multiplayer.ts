@@ -1,13 +1,20 @@
 import { formatKm, formatTime } from './format';
 import { SEGMENT_LENGTH, START_Z } from './game/constants';
 import { MAPS } from './game/maps';
+import { css } from './game/themes';
+import { buildTrack } from './game/track';
+import type { Track } from './game/types';
+import { drawCourse } from './render/minimap';
+import { RIVAL_COLORS } from './render/sprites';
 import {
   cleanName,
   extrapolate,
   makeRoomCode,
   parseRoomCode,
   pickHost,
+  MAX_PLAYERS,
   readRacer,
+  readiness,
   roomName,
   standings,
   type Racer,
@@ -97,6 +104,34 @@ const STYLE = `
 .mp-note{margin:0;color:#9aa6d6;font-size:14px}
 .mp-note.mp-warn{color:#ffb3a7}
 .mp-open[hidden],.mp-layer[hidden]{display:none}
+.mp-card.mp-room{width:min(880px,100%);gap:16px}
+.mp-room-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.mp-room-head .mp-code{font-size:40px}
+.mp-room-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:16px}
+@media (max-width:720px){.mp-room-body{grid-template-columns:minmax(0,1fr)}}
+.mp-panel{background:#0b1024;border:1px solid #2b3566;border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.mp-map-picker{display:flex;align-items:center;gap:10px}
+.mp-map-picker canvas{flex:1;min-width:0;width:100%;max-width:180px;aspect-ratio:1;margin:0 auto;display:block}
+.mp-map-picker button{font-size:20px;padding:14px 12px}
+.mp-map-name{margin:0;font-size:22px;font-weight:700;text-align:center}
+.mp-map-stars{margin:0;text-align:center;color:#ffe066;letter-spacing:.1em}
+.mp-map-route{margin:0;text-align:center;color:#9aa6d6;font-size:13px}
+.mp-slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+@media (max-width:420px){.mp-slots{grid-template-columns:minmax(0,1fr)}}
+.mp-slot{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;background:#141a33;border:1px solid #2b3566;min-height:56px}
+.mp-slot.mp-me{border-color:#ffe066}
+.mp-slot.mp-empty{background:transparent;border-style:dashed;color:#5d6896;justify-content:center;font-size:14px}
+.mp-swatch{width:14px;height:34px;border-radius:4px;flex:none}
+.mp-slot-text{display:flex;flex-direction:column;min-width:0;flex:1}
+.mp-slot-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mp-slot-tag{font-size:12px;color:#9aa6d6}
+.mp-badge{flex:none;font-size:12px;font-weight:700;padding:4px 8px;border-radius:999px;background:#1f2850;color:#9aa6d6;letter-spacing:.04em}
+.mp-badge.mp-on{background:#2f9e44;color:#fff}
+.mp-badge.mp-host{background:#ffe066;color:#141a33}
+.mp-room-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mp-room-foot .mp-note{flex:1;min-width:200px}
+.mp-room-foot .mp-main{min-width:180px;padding:15px 18px;font-size:17px}
+.mp-card button.mp-ready{background:#2f9e44;border-color:#2f9e44;color:#fff}
 `;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] {
@@ -156,6 +191,18 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
     'mp-open',
   );
   const layer = el('div', '', 'mp-layer');
+  // 대기실에서는 Enter로 준비하거나 시작하고, 방장은 ← →로 맵을 바꿉니다.
+  window.addEventListener('keydown', (event) => {
+    if (panel !== 'room' || event.repeat || event.target instanceof HTMLInputElement) return;
+    // 버튼에 초점이 있으면 Enter는 그 버튼을 누르는 것으로 처리되므로 여기서는 맵 바꾸기만 받습니다.
+    if ((event.code === 'Enter' || event.code === 'NumpadEnter') && !(event.target instanceof HTMLButtonElement)) {
+      event.preventDefault();
+      primaryAction();
+    } else if (event.code === 'ArrowLeft' || event.code === 'ArrowRight') {
+      event.preventDefault();
+      moveMap(event.code === 'ArrowLeft' ? -1 : 1);
+    }
+  });
   layer.hidden = true;
   document.body.append(openButton, layer);
 
@@ -170,6 +217,11 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
   /** 지금 달리는 경주. by는 이 경주를 시작한 방장의 이름표입니다. */
   let race: { id: string; map: number; seed: number; by: string | null } | null = null;
   let owner = false;
+  /** 대기실에서 내가 준비를 마쳤는지 여부. */
+  let myReady = false;
+  /** 방장이 마지막으로 고른 맵. 바뀌면 내 화면 뒤의 코스도 바꿉니다. */
+  let lastHostMap = -1;
+  const previews = new Map<number, Track>();
   let joining = false;
   let sentFinish = false;
   /** 순위표에서 다시 그리지 않고 줄만 바꿀 목록과, 그 목록을 그린 경주와 방장 여부. */
@@ -412,6 +464,8 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
       joining = false;
     }
     owner = asOwner;
+    myReady = false;
+    lastHostMap = -1;
     code = target;
     pendingCode = '';
     since = Date.now();
@@ -426,6 +480,7 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
       race: null,
       map: pickedMap,
       seed: 0,
+      ready: false,
       z: START_Z,
       x: 0,
       speed: 0,
@@ -452,6 +507,9 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
   }
 
   function startRace(): void {
+    // 참가자가 모두 준비해야 시작합니다.
+    const all = everyone().map((entry) => entry.racer);
+    if (!readiness(all, pickHost(all)).canStart) return;
     const id = Date.now().toString(36);
     const seed = 1 + Math.floor(Math.random() * 0x7fffffff);
     seenRace = id;
@@ -461,14 +519,28 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
   function beginRace(id: string, map: number, seed: number, by: string | null): void {
     race = { id, map, seed, by };
     sentFinish = false;
-    send({ phase: 'race', race: id, map, seed, z: START_Z, x: 0, speed: 0, boost: false, done: null, out: false });
+    myReady = false;
+    send({
+      phase: 'race',
+      race: id,
+      map,
+      seed,
+      ready: false,
+      z: START_Z,
+      x: 0,
+      speed: 0,
+      boost: false,
+      done: null,
+      out: false,
+    });
     hide();
     hooks.onRaceStart(map, seed);
   }
 
   function backToWait(map: number): void {
     race = null;
-    send({ phase: 'wait', race: null });
+    myReady = false;
+    send({ phase: 'wait', race: null, ready: false });
     hooks.onWait(map);
     showRoom();
   }
@@ -488,23 +560,71 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
         backToWait(h.map);
         return;
       }
+      // 대기실에서 방장이 맵을 바꾸면 내 화면 뒤의 코스도 같은 맵으로 바꿉니다.
+      if (!race && h.map !== lastHostMap && h.map < MAPS.length) {
+        lastHostMap = h.map;
+        hooks.onWait(h.map);
+      }
     }
     advertise();
     if (panel === 'room') showRoom();
   }
 
+  function previewOf(map: number): Track {
+    let track = previews.get(map);
+    if (!track) {
+      track = buildTrack(MAPS[map]);
+      previews.set(map, track);
+    }
+    return track;
+  }
+
+  function moveMap(direction: number): void {
+    if (!isHost()) return;
+    pickedMap = (pickedMap + direction + MAPS.length) % MAPS.length;
+    send({ map: pickedMap });
+    hooks.onWait(pickedMap);
+    showRoom();
+  }
+
+  function toggleReady(): void {
+    myReady = !myReady;
+    send({ ready: myReady });
+    showRoom();
+  }
+
+  /** 대기실의 주 버튼. 방장은 시작하고, 참가자는 준비하거나 준비를 풉니다. */
+  function primaryAction(): void {
+    hooks.onGesture();
+    if (isHost()) startRace();
+    else toggleReady();
+  }
+
+  /** 실제 게임의 대기실처럼, 방 코드와 초대, 맵 고르기, 참가자 자리와 준비 상태를 한 화면에 보여 줍니다. */
   function showRoom(): void {
     if (!room || !code) return;
     const host = isHost();
-    const hostEntry = hostRacer();
+    const all = everyone();
+    const hostPeer = pickHost(all.map((entry) => entry.racer));
+    const hostEntry = all.find((entry) => entry.racer.peer === hostPeer);
     const map = host ? pickedMap : Math.min(MAPS.length - 1, hostEntry?.racer.map ?? 0);
-    const roster = everyone().map((entry) => [entry.racer.peer, entry.racer.name, entry.me]);
-    if (unchanged('room', JSON.stringify([code, host, map, hostEntry?.racer.peer, roster]))) return;
-    const card = el('div', '', 'mp-card');
-    card.append(el('h3', '방 코드'), el('div', code.toUpperCase(), 'mp-code'));
+    const state = readiness(
+      all.map((entry) => ({ peer: entry.racer.peer, ready: entry.me ? myReady : entry.racer.ready })),
+      hostPeer,
+    );
+    const roster = all.map((entry) => [entry.racer.peer, entry.racer.name, entry.me, entry.racer.ready]);
+    if (unchanged('room', JSON.stringify([code, host, map, hostPeer, roster, myReady]))) return;
 
+    const card = el('div', '', 'mp-card mp-room');
+
+    // 위쪽: 방 코드와 초대
+    const head = el('div', '', 'mp-room-head');
+    const codeBox = el('div');
+    codeBox.append(el('h3', '방 코드'), el('div', code.toUpperCase(), 'mp-code'));
     const link = `${inviteBase}#${code}`;
-    const linkRow = el('div', '', 'mp-row');
+    const invite = el('div', '', 'mp-row');
+    invite.style.flex = '1';
+    invite.style.minWidth = '260px';
     const linkInput = el('input');
     linkInput.readOnly = true;
     linkInput.value = link;
@@ -520,54 +640,92 @@ export function createMultiplayer(hooks: MultiplayerHooks): Multiplayer {
         },
       );
     });
-    linkRow.append(linkInput, copy);
-    card.append(linkRow);
+    invite.append(linkInput, copy);
+    head.append(codeBox, invite);
+    card.append(head);
 
-    const all = everyone();
-    const hostPeer = pickHost(all.map((entry) => entry.racer));
-    card.append(el('h3', `참가자 ${all.length}명`));
-    const list = el('ul', '', 'mp-list');
-    for (const entry of all) {
-      const item = el('li', '', entry.me ? 'mp-me' : '');
-      const tags = [entry.racer.peer === hostPeer ? '방장' : '', entry.me ? '나' : ''].filter(Boolean).join(' · ');
-      item.append(el('span', entry.me ? name : entry.racer.name), el('span', tags));
-      list.append(item);
-    }
-    card.append(list);
+    const body = el('div', '', 'mp-room-body');
 
-    card.append(el('h3', '맵'));
-    const mapRow = el('div', '', 'mp-row');
-    const label = el('span', `${MAPS[map].name}  ${stars(MAPS[map].difficulty)}`);
-    label.style.flex = '1';
+    // 왼쪽: 맵 고르기
+    const mapPanel = el('section', '', 'mp-panel');
+    mapPanel.append(el('h3', host ? '맵 고르기' : '맵'));
+    const picker = el('div', '', 'mp-map-picker');
+    const preview = el('canvas');
+    preview.width = 180;
+    preview.height = 180;
+    preview.setAttribute('aria-label', `${MAPS[map].name} 코스 모양`);
+    const pctx = preview.getContext('2d');
+    if (pctx) drawCourse(pctx, previewOf(map), 0, 0, 180, START_Z);
     if (host) {
-      const move = (direction: number): void => {
-        pickedMap = (pickedMap + direction + MAPS.length) % MAPS.length;
-        send({ map: pickedMap });
-        hooks.onWait(pickedMap);
-        showRoom();
-      };
-      mapRow.append(
-        button('◀', () => move(-1)),
-        label,
-        button('▶', () => move(1)),
-      );
-      card.append(
-        mapRow,
-        button(
-          '출발하기',
-          () => {
-            hooks.onGesture();
-            startRace();
-          },
-          'mp-main',
-        ),
-      );
+      const prev = button('◀', () => moveMap(-1));
+      const next = button('▶', () => moveMap(1));
+      prev.setAttribute('aria-label', '이전 맵');
+      next.setAttribute('aria-label', '다음 맵');
+      picker.append(prev, preview, next);
     } else {
-      mapRow.append(label);
-      card.append(mapRow, el('p', '방장이 맵을 고르고 출발하기를 누르면 시작해요.', 'mp-note'));
+      picker.append(preview);
     }
-    card.append(button('방 나가기', () => void leave()));
+    mapPanel.append(
+      picker,
+      el('p', MAPS[map].name, 'mp-map-name'),
+      el('p', stars(MAPS[map].difficulty), 'mp-map-stars'),
+      el('p', MAPS[map].sections.map((section) => section.theme.name).join(' → '), 'mp-map-route'),
+      el('p', host ? '← → 키나 화살표 버튼으로 맵을 바꿀 수 있어요.' : '방장이 맵을 고르고 있어요.', 'mp-note'),
+    );
+
+    // 오른쪽: 참가자 자리
+    const slotPanel = el('section', '', 'mp-panel');
+    slotPanel.append(el('h3', `참가자 ${all.length}/${MAX_PLAYERS}`));
+    const slots = el('div', '', 'mp-slots');
+    for (const entry of all) {
+      const isHostSlot = entry.racer.peer === hostPeer;
+      const ready = entry.me ? myReady : entry.racer.ready;
+      const slot = el('div', '', `mp-slot${entry.me ? ' mp-me' : ''}`);
+      const swatch = el('span', '', 'mp-swatch');
+      swatch.style.background = css(RIVAL_COLORS[colorOf(entry.racer.peer) % RIVAL_COLORS.length]);
+      const text = el('div', '', 'mp-slot-text');
+      text.append(
+        el('span', entry.me ? name : entry.racer.name, 'mp-slot-name'),
+        el('span', entry.me ? '나' : '', 'mp-slot-tag'),
+      );
+      const badge = isHostSlot
+        ? el('span', '방장', 'mp-badge mp-host')
+        : el('span', ready ? '준비 완료' : '준비 중', `mp-badge${ready ? ' mp-on' : ''}`);
+      slot.append(swatch, text, badge);
+      slots.append(slot);
+    }
+    for (let i = all.length; i < MAX_PLAYERS; i++) slots.append(el('div', '초대 대기 중', 'mp-slot mp-empty'));
+    slotPanel.append(slots);
+
+    body.append(mapPanel, slotPanel);
+    card.append(body);
+
+    // 아래쪽: 준비와 시작
+    const foot = el('div', '', 'mp-room-foot');
+    let status: string;
+    let main: HTMLButtonElement;
+    if (host) {
+      status =
+        state.needed === 0
+          ? '혼자서도 시작할 수 있어요. 초대 링크를 보내 친구를 불러 보세요.'
+          : state.canStart
+            ? '모두 준비됐어요. 시작하기를 누르세요.'
+            : `참가자가 모두 준비하면 시작할 수 있어요 (${state.ready}/${state.needed} 준비).`;
+      main = button('시작하기', primaryAction, 'mp-main');
+      main.disabled = !state.canStart;
+    } else {
+      status = myReady ? '준비 완료! 방장이 시작하기를 기다려요.' : '준비하기를 누르면 방장이 시작할 수 있어요.';
+      main = button(myReady ? '준비 취소' : '준비하기', primaryAction, myReady ? 'mp-ready' : 'mp-main');
+    }
+    foot.append(
+      el('p', status, 'mp-note'),
+      button('방 나가기', () => void leave()),
+      main,
+    );
+    card.append(foot);
+
     show('room', card);
+    main.focus({ preventScroll: true });
   }
 
   function showResults(): void {

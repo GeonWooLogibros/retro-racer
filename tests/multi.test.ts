@@ -7,6 +7,7 @@ import {
   parseRoomCode,
   pickHost,
   readRacer,
+  readiness,
   roomName,
   standings,
 } from '../src/game/multi';
@@ -59,6 +60,7 @@ describe('readRacer', () => {
       map: 2,
       seed: 9,
       phase: 'race',
+      ready: true,
       race: 'r1',
       z: 100,
       x: 0.5,
@@ -75,6 +77,7 @@ describe('readRacer', () => {
       map: 2,
       seed: 9,
       phase: 'race',
+      ready: true,
       race: 'r1',
       z: 100,
       x: 0.5,
@@ -102,6 +105,7 @@ describe('readRacer', () => {
       since: Number.MAX_SAFE_INTEGER,
       map: 0,
       phase: 'wait',
+      ready: false,
       race: null,
       z: 0,
       x: 2,
@@ -165,5 +169,25 @@ describe('extrapolate', () => {
     expect(extrapolate(1000, 2000, 250)).toBe(1500);
     expect(extrapolate(1000, 2000, 5000)).toBe(2000);
     expect(extrapolate(1000, 2000, -10)).toBe(1000);
+  });
+});
+
+describe('readiness', () => {
+  it('방장을 뺀 모두가 준비해야 시작할 수 있습니다', () => {
+    const racers = [
+      { peer: 'host', ready: false },
+      { peer: 'a', ready: true },
+      { peer: 'b', ready: false },
+    ];
+    expect(readiness(racers, 'host')).toEqual({ ready: 1, needed: 2, canStart: false });
+    expect(readiness([...racers.slice(0, 2), { peer: 'b', ready: true }], 'host')).toEqual({
+      ready: 2,
+      needed: 2,
+      canStart: true,
+    });
+  });
+
+  it('방장 혼자면 바로 시작할 수 있습니다', () => {
+    expect(readiness([{ peer: 'host', ready: false }], 'host')).toEqual({ ready: 0, needed: 0, canStart: true });
   });
 });
